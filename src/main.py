@@ -32,9 +32,9 @@ def main():
             logger.info("Setting up database...")
             db_manager.setup_database()
             
-            # Crawl repositories (start with smaller number for testing)
+            # Crawl 100,000 repositories as required
             crawler = RepositoryCrawler(github_client, db_manager)
-            total_crawled = crawler.crawl_repositories(target_count=100000)  # Reduced for testing
+            total_crawled = crawler.crawl_repositories(target_count=100000, batch_size=100)
             
             # Export data
             logger.info("Exporting data...")

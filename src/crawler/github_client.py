@@ -50,9 +50,12 @@ class GitHubClient:
             "variables": variables
         }
         
-        while True:
+        retry_count = 0
+        max_retries = 5
+        
+        while retry_count < max_retries:
             try:
-                response = requests.post(self.base_url, json=payload, headers=headers, timeout=30)
+                response = requests.post(self.base_url, json=payload, headers=headers, timeout=60)
                 
                 if response.status_code == 200:
                     data = response.json()
@@ -68,10 +71,11 @@ class GitHubClient:
                             if 'type' in error and error['type'] == 'RATE_LIMITED':
                                 sleep_time = self.rate_limit_reset - time.time() + 10
                                 if sleep_time > 0:
-                                    logger.warning(f"Rate limited. Sleeping for {sleep_time} seconds")
+                                    logger.warning(f"Rate limited. Sleeping for {sleep_time:.1f} seconds")
                                     time.sleep(sleep_time)
                                 continue
                             else:
+                                logger.error(f"GraphQL error: {error}")
                                 raise Exception(f"GraphQL error: {error}")
                     
                     return data
@@ -80,28 +84,45 @@ class GitHubClient:
                     # Rate limited
                     sleep_time = self.rate_limit_reset - time.time() + 10
                     if sleep_time > 0:
-                        logger.warning(f"Rate limited. Sleeping for {sleep_time} seconds")
+                        logger.warning(f"Rate limited. Sleeping for {sleep_time:.1f} seconds")
                         time.sleep(sleep_time)
                     continue
                     
                 else:
                     logger.error(f"HTTP {response.status_code}: {response.text}")
-                    response.raise_for_status()
+                    if response.status_code >= 500:
+                        # Server error, retry with backoff
+                        retry_count += 1
+                        sleep_time = 2 ** retry_count  # Exponential backoff
+                        logger.warning(f"Server error, retrying in {sleep_time} seconds...")
+                        time.sleep(sleep_time)
+                        continue
+                    else:
+                        response.raise_for_status()
                     
             except requests.exceptions.RequestException as e:
-                logger.error(f"Request failed: {e}")
-                time.sleep(60)  # Wait before retrying
-                continue
+                retry_count += 1
+                sleep_time = 2 ** retry_count  # Exponential backoff
+                logger.error(f"Request failed (attempt {retry_count}/{max_retries}): {e}")
+                if retry_count < max_retries:
+                    logger.info(f"Retrying in {sleep_time} seconds...")
+                    time.sleep(sleep_time)
+                else:
+                    logger.error("Max retries exceeded")
+                    raise
+        
+        raise Exception("Max retries exceeded for GitHub API request")
     
-    def get_repositories_batch(self, cursor: Optional[str] = None, batch_size: int = 50) -> tuple[List[Repository], Optional[str]]:
+    def get_repositories_batch(self, cursor: Optional[str] = None, batch_size: int = 100) -> tuple[List[Repository], Optional[str]]:
         query = """
         query($cursor: String) {
           search(
-            query: "stars:>1 sort:updated-desc"
+            query: "stars:>0 sort:updated-desc"
             type: REPOSITORY
             first: %d
             after: $cursor
           ) {
+            repositoryCount
             edges {
               node {
                 ... on Repository {
@@ -178,5 +199,9 @@ class GitHubClient:
         
         page_info = search_data['pageInfo']
         next_cursor = page_info['endCursor'] if page_info['hasNextPage'] else None
+        
+        # Log repository count if available
+        if 'repositoryCount' in search_data:
+            logger.debug(f"Total repositories in search: {search_data['repositoryCount']}")
         
         return repositories, next_cursor
