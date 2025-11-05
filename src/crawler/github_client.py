@@ -237,106 +237,73 @@ class GitHubClient:
         
         return repositories, next_cursor
     
-    def get_repositories_by_date(self, date_str: str, cursor: Optional[str] = None, batch_size: int = 100) -> tuple[List[Repository], Optional[str]]:
-        """Get repositories created on a specific date"""
-        query = """
-        query($cursor: String, $query: String!) {
-          search(
-            query: $query
-            type: REPOSITORY
-            first: %d
-            after: $cursor
-          ) {
-            repositoryCount
-            edges {
-              node {
-                ... on Repository {
-                  id
-                  name
-                  owner {
-                    login
-                  }
-                  nameWithOwner
-                  description
-                  stargazerCount
-                  forkCount
-                  issues(states: OPEN) {
-                    totalCount
-                  }
-                  primaryLanguage {
-                    name
-                  }
-                  createdAt
-                  updatedAt
-                  pushedAt
-                  diskUsage
-                  isArchived
-                  isDisabled
-                  licenseInfo {
-                    key
-                  }
-                }
-              }
-            }
-            pageInfo {
-              hasNextPage
-              endCursor
-            }
-          }
-          rateLimit {
-            cost
-            remaining
-            resetAt
-          }
-        }
-        """ % batch_size
-        
-        search_query = f"created:{date_str} sort:updated-desc"
-        variables = {
-            "query": search_query,
-            "cursor": cursor
-        }
-        
-        data = self._make_request(query, variables)
-        
-        if not data or 'data' not in data:
-            logger.error("Invalid response data")
-            return [], None
-            
-        search_data = data['data']['search']
-        
-        repositories = []
-        for edge in search_data['edges']:
-            node = edge['node']
-            repo = Repository(
-                github_id=node['id'],
-                name=node['name'],
-                owner_login=node['owner']['login'],
-                full_name=node['nameWithOwner'],
-                description=node['description'],
-                stargazers_count=node['stargazerCount'],
-                forks_count=node['forkCount'],
-                open_issues_count=node['issues']['totalCount'],
-                language=node['primaryLanguage']['name'] if node['primaryLanguage'] else None,
-                created_at=node['createdAt'],
-                updated_at=node['updatedAt'],
-                pushed_at=node['pushedAt'],
-                size=node['diskUsage'],
-                archived=node['isArchived'],
-                disabled=node['isDisabled'],
-                license_info=node['licenseInfo']['key'] if node['licenseInfo'] else None
-            )
-            repositories.append(repo)
-        
-        page_info = search_data['pageInfo']
-        next_cursor = page_info['endCursor'] if page_info['hasNextPage'] else None
-        
-        if 'repositoryCount' in search_data:
-            logger.debug(f"Found {search_data['repositoryCount']} repositories for date {date_str}")
-            
-        return repositories, next_cursor
+    def get_repositories_by_date(self, date_str: str, cursor: Optional[str] = None, batch_size: int = 100):
+        """
+        Fetches repositories created on a specific date.
 
-    def get_repositories_by_language(self, language: str, cursor: Optional[str] = None, batch_size: int = 100) -> tuple[List[Repository], Optional[str]]:
+        Args:
+            date_str (str): The date in 'YYYY-MM-DD' format.
+            cursor (str, optional): The cursor for pagination.
+            batch_size (int, optional): The number of repositories to fetch.
+
+        Returns:
+            A tuple containing:
+            - A list of Repository objects.
+            - The end cursor for the next page, or None.
+            - A dictionary with rate limit information.
+        """
+        query = """
+        query($searchQuery: String!, $cursor: String, $first: Int) {
+            rateLimit {
+                limit
+                cost
+                remaining
+                resetAt
+            }
+            search(query: $searchQuery, type: REPOSITORY, first: $first, after: $cursor) {
+                repositoryCount
+                pageInfo {
+                    endCursor
+                    hasNextPage
+                }
+                nodes {
+                    ... on Repository {
+                        id
+                        nameWithOwner
+                        url
+                        description
+                        stargazerCount
+                        forkCount
+                        pushedAt
+                        createdAt
+                        primaryLanguage {
+                            name
+                        }
+                    }
+                }
+            }
+        }
+        """
+        search_query = f"created:{date_str}"
+        variables = {"searchQuery": search_query, "cursor": cursor, "first": batch_size}
+
+        response_data = self._make_request(query, variables)
+
+        if not response_data or "search" not in response_data:
+            return [], None, response_data.get("rateLimit") if response_data else None
+
+        search_results = response_data["search"]
+        rate_limit = response_data.get("rateLimit")
+        repositories = [
+            self._to_repository(node) for node in search_results.get("nodes", []) if node
+        ]
+        page_info = search_results.get("pageInfo", {})
+        end_cursor = page_info.get("endCursor")
+        has_next_page = page_info.get("hasNextPage", False)
+
+        return repositories, end_cursor if has_next_page else None, rate_limit
+
+    def get_repositories_by_language(self, language: str, cursor: Optional[str] = None):
         """Get repositories by programming language"""
         query = """
         query($cursor: String, $query: String!) {
