@@ -11,7 +11,7 @@ class RepositoryCrawler:
         self.github_client = github_client
         self.db_manager = db_manager
         
-    def crawl_repositories(self, target_count: int = 100, batch_size: int = 50) -> int:
+    def crawl_repositories(self, target_count: int = 100000, batch_size: int = 25000) -> int:
         total_crawled = 0
         cursor = None
         consecutive_errors = 0
@@ -36,7 +36,7 @@ class RepositoryCrawler:
                           f"(Total: {total_crawled}, Inserted: {inserted}, Updated: {updated})")
                 
                 # Respect rate limits
-                if self.github_client.rate_limit_remaining < 100:
+                if self.github_client.rate_limit_remaining < 100000:
                     sleep_time = max(1, (self.github_client.rate_limit_reset - time.time()) + 10)
                     logger.warning(f"Approaching rate limit. Sleeping for {sleep_time} seconds")
                     time.sleep(sleep_time)

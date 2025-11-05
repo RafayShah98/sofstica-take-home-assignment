@@ -34,7 +34,7 @@ def main():
             
             # Crawl repositories (start with smaller number for testing)
             crawler = RepositoryCrawler(github_client, db_manager)
-            total_crawled = crawler.crawl_repositories(target_count=100)  # Reduced for testing
+            total_crawled = crawler.crawl_repositories(target_count=100000)  # Reduced for testing
             
             # Export data
             logger.info("Exporting data...")
