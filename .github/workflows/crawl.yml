@@ -1,0 +1,66 @@
+name: GitHub Repository Crawler
+
+on:
+  workflow_dispatch: # Manual trigger
+  schedule:
+    - cron: "0 2 * * *" # Run daily at 2 AM UTC
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:13
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: github_crawler
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.9"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Setup PostgreSQL database
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/github_crawler
+        run: |
+          python scripts/setup_database.py
+
+      - name: Crawl GitHub repositories
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/github_crawler
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python src/main.py
+
+      - name: Export data
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/github_crawler
+        run: |
+          python scripts/export_data.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: github-repositories-data
+          path: |
+            repositories_export.csv
+            repositories_export.json
+          retention-days: 30
