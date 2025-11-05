@@ -41,19 +41,14 @@ def main():
                 logger.info(f"Successfully crawled {total_crawled} repositories.")
             
                 # Export data to CSV
-                logger.info("Exporting data...")
-                csv_data = db_manager.export_data('csv')
-                
-                # Write to file
-                with open('repositories_export.csv', 'w', encoding='utf-8') as f:
-                    f.write(csv_data)
-                
-                logger.info(f"Successfully crawled {total_crawled} repositories")
-                logger.info("Data exported to repositories_export.csv")
-                
+                output_csv_path = "repositories_export.csv"
+                logger.info(f"Exporting data to {output_csv_path}...")
+                db_manager.export_to_csv(output_csv_path)
+                logger.info("Data export complete.")
+            
     except Exception as e:
         logger.error(f"Application failed: {e}")
-        raise
+
 
 if __name__ == "__main__":
     main()
