@@ -34,19 +34,23 @@ def main():
             
             # Crawl 100,000 repositories as required
             crawler = RepositoryCrawler(github_client, db_manager)
-            total_crawled = crawler.crawl_repositories(target_count=100000, batch_size=100)
+            try:
+                # Crawl repositories
+                # Set larger target count for the assignment requirement
+                total_crawled = crawler.crawl_repositories(max_repos=100000, batch_size=100)
+                logger.info(f"Successfully crawled {total_crawled} repositories.")
             
-            # Export data
-            logger.info("Exporting data...")
-            csv_data = db_manager.export_data('csv')
-            
-            # Write to file
-            with open('repositories_export.csv', 'w', encoding='utf-8') as f:
-                f.write(csv_data)
-            
-            logger.info(f"Successfully crawled {total_crawled} repositories")
-            logger.info("Data exported to repositories_export.csv")
-            
+                # Export data to CSV
+                logger.info("Exporting data...")
+                csv_data = db_manager.export_data('csv')
+                
+                # Write to file
+                with open('repositories_export.csv', 'w', encoding='utf-8') as f:
+                    f.write(csv_data)
+                
+                logger.info(f"Successfully crawled {total_crawled} repositories")
+                logger.info("Data exported to repositories_export.csv")
+                
     except Exception as e:
         logger.error(f"Application failed: {e}")
         raise
