@@ -34,9 +34,9 @@ def main():
             
             # Crawl 100,000 repositories as required
             crawler = RepositoryCrawler(github_client, db_manager)
+            
             try:
                 # Crawl repositories
-                # Set larger target count for the assignment requirement
                 total_crawled = crawler.crawl_repositories(max_repos=100000, batch_size=100)
                 logger.info(f"Successfully crawled {total_crawled} repositories.")
             
@@ -46,6 +46,9 @@ def main():
                 db_manager.export_to_csv(output_csv_path)
                 logger.info("Data export complete.")
             
+            except Exception as crawl_error:
+                logger.error(f"Crawling failed: {crawl_error}")
+
     except Exception as e:
         logger.error(f"Application failed: {e}")
 
