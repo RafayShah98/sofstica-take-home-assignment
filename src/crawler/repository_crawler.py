@@ -2,8 +2,8 @@ import time
 import logging
 from typing import List, Optional
 from datetime import datetime, timedelta, timezone
-from .github_client import GitHubClient, Repository
-from src.database.models import DatabaseManager
+from .github_client import GitHubClient
+from ..database.models import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
