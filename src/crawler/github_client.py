@@ -4,6 +4,7 @@ import requests
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 import logging
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,8 @@ class GitHubClient:
         self.base_url = "https://api.github.com/graphql"
         self.rate_limit_remaining = 5000
         self.rate_limit_reset = 0
-        
+        self.last_query_cost = 1  # Default cost
+
     def _make_request(self, query: str, variables: Dict = None) -> Dict:
         headers = {
             "Authorization": f"Bearer {self.token}" if self.token else "",
@@ -56,31 +58,53 @@ class GitHubClient:
                 if response.status_code == 200:
                     data = response.json()
                     
-                    # Update rate limit info from headers
-                    if 'X-RateLimit-Remaining' in response.headers:
+                    # Update rate limit info from GraphQL response if available (more accurate)
+                    if 'data' in data and data.get('data') and 'rateLimit' in data['data'] and data['data']['rateLimit']:
+                        rate_limit_data = data['data']['rateLimit']
+                        self.rate_limit_remaining = rate_limit_data['remaining']
+                        self.last_query_cost = rate_limit_data['cost']
+                        # Parse UTC timestamp
+                        reset_at_utc = datetime.strptime(rate_limit_data['resetAt'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+                        self.rate_limit_reset = reset_at_utc.timestamp()
+                    # Fallback to headers if GraphQL data is missing
+                    elif 'X-RateLimit-Remaining' in response.headers:
                         self.rate_limit_remaining = int(response.headers['X-RateLimit-Remaining'])
-                    if 'X-RateLimit-Reset' in response.headers:
-                        self.rate_limit_reset = int(response.headers['X-RateLimit-Reset'])
-                    
+                        if 'X-RateLimit-Reset' in response.headers:
+                            self.rate_limit_reset = int(response.headers['X-RateLimit-Reset'])
+
                     if 'errors' in data:
+                        rate_limit_hit = False
                         for error in data['errors']:
-                            if 'type' in error and error['type'] == 'RATE_LIMITED':
-                                sleep_time = self.rate_limit_reset - time.time() + 10
-                                if sleep_time > 0:
-                                    logger.warning(f"Rate limited. Sleeping for {sleep_time:.1f} seconds")
-                                    time.sleep(sleep_time)
-                                continue
+                            if error.get('type') == 'RATE_LIMITED':
+                                rate_limit_hit = True
+                                break  # Found the rate limit error
                             else:
                                 logger.error(f"GraphQL error: {error}")
-                                raise Exception(f"GraphQL error: {error}")
+                        
+                        if rate_limit_hit:
+                            sleep_time = self.rate_limit_reset - time.time() + 15  # 15s buffer
+                            if sleep_time > 0:
+                                logger.warning(f"Hard rate limit hit. Sleeping for {sleep_time:.1f} seconds until reset.")
+                                time.sleep(sleep_time)
+                            # Now continue the while loop to retry the request
+                            continue
+                        else:
+                            # If there were errors but none were rate limit errors
+                            raise Exception(f"GraphQL query failed with errors: {data['errors']}")
                     
                     return data
                     
                 elif response.status_code == 403:
-                    # Rate limited
-                    sleep_time = self.rate_limit_reset - time.time() + 10
-                    if sleep_time > 0:
-                        logger.warning(f"Rate limited. Sleeping for {sleep_time:.1f} seconds")
+                    # This could also indicate a rate limit issue
+                    sleep_time = self.rate_limit_reset - time.time() + 15
+                    if self.rate_limit_reset > 0 and sleep_time > 0:
+                        logger.warning(f"Received HTTP 403. Potentially rate-limited. Sleeping for {sleep_time:.1f} seconds.")
+                        time.sleep(sleep_time)
+                    else:
+                        # If we don't have reset info, do an exponential backoff
+                        retry_count += 1
+                        sleep_time = (2 ** retry_count)
+                        logger.warning(f"Received HTTP 403. Retrying in {sleep_time} seconds...")
                         time.sleep(sleep_time)
                     continue
                     

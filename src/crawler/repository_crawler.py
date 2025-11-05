@@ -12,6 +12,39 @@ class RepositoryCrawler:
         self.github_client = github_client
         self.db_manager = db_manager
         self.seen_repository_ids = set()
+
+    def adaptive_sleep(self):
+        """Dynamically calculates sleep time to avoid rate limiting."""
+        remaining = self.github_client.rate_limit_remaining
+        cost = self.github_client.last_query_cost
+        
+        # If we have plenty of requests left, no need to sleep long
+        if remaining > 1000:
+            time.sleep(0.1) # A minimal polite sleep
+            return
+
+        # If we are getting low, calculate sleep time more carefully
+        time_to_reset = self.github_client.rate_limit_reset - time.time()
+        
+        if time_to_reset <= 0:
+            time.sleep(1) # Reset time has passed, sleep a bit just in case
+            return
+            
+        # Calculate how many requests we can make per second, leaving a buffer
+        safe_remaining = max(0, remaining - 100) 
+        requests_per_sec = safe_remaining / time_to_reset
+        
+        # If our budget is less than 2 requests per second, we need to slow down
+        if requests_per_sec < 2:
+            # Calculate sleep time to spread requests evenly until the reset
+            sleep_for = (1 / requests_per_sec) * cost
+            # Cap sleep time to avoid excessively long waits between requests
+            sleep_for = min(sleep_for, 15) 
+            logger.info(f"Rate limit low ({remaining} left). Throttling requests. Sleeping for {sleep_for:.2f}s.")
+            time.sleep(sleep_for)
+        else:
+            # We can afford to go faster
+            time.sleep(0.25) # Sleep a bit to be polite
         
     def crawl_repositories(self, target_count: int = 100000, batch_size: int = 100) -> int:
         total_crawled = 0
@@ -75,14 +108,8 @@ class RepositoryCrawler:
                               f"Rate: {repos_per_second:.1f} repos/sec | "
                               f"ETA: {eta_hours:.1f} hours")
                     
-                    # Respect rate limits
-                    if self.github_client.rate_limit_remaining < 200:
-                        sleep_time = max(1, (self.github_client.rate_limit_reset - time.time()) + 15)
-                        logger.warning(f"Approaching rate limit. Sleeping for {sleep_time:.1f} seconds")
-                        time.sleep(sleep_time)
-                    
-                    # Small delay to be polite
-                    time.sleep(0.1)
+                    # Adaptive delay to avoid hitting rate limits
+                    self.adaptive_sleep()
                     
                     if not cursor:
                         logger.info(f"Completed crawling for date {date_str}")
