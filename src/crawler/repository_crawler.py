@@ -2,7 +2,7 @@ import time
 import logging
 from typing import List, Optional
 from .github_client import GitHubClient, Repository
-from src.database.models import DatabaseManager  # Changed from relative to absolute import
+from src.database.models import DatabaseManager
 
 logger = logging.getLogger(__name__)
 
@@ -14,10 +14,12 @@ class RepositoryCrawler:
     def crawl_repositories(self, target_count: int = 100, batch_size: int = 50) -> int:
         total_crawled = 0
         cursor = None
+        consecutive_errors = 0
+        max_consecutive_errors = 3
         
         logger.info(f"Starting to crawl {target_count} repositories")
         
-        while total_crawled < target_count:
+        while total_crawled < target_count and consecutive_errors < max_consecutive_errors:
             try:
                 repositories, cursor = self.github_client.get_repositories_batch(cursor, batch_size)
                 
@@ -28,6 +30,7 @@ class RepositoryCrawler:
                 # Upsert repositories
                 inserted, updated = self.db_manager.upsert_repositories(repositories)
                 total_crawled += len(repositories)
+                consecutive_errors = 0  # Reset error counter on success
                 
                 logger.info(f"Crawled {len(repositories)} repositories "
                           f"(Total: {total_crawled}, Inserted: {inserted}, Updated: {updated})")
@@ -46,8 +49,14 @@ class RepositoryCrawler:
                     break
                     
             except Exception as e:
-                logger.error(f"Error crawling repositories: {e}")
-                time.sleep(60)
+                consecutive_errors += 1
+                logger.error(f"Error crawling repositories (attempt {consecutive_errors}/{max_consecutive_errors}): {e}")
+                
+                if consecutive_errors >= max_consecutive_errors:
+                    logger.error("Too many consecutive errors, stopping crawl")
+                    break
+                    
+                time.sleep(60 * consecutive_errors)  # Exponential backoff
                 continue
         
         logger.info(f"Completed crawling {total_crawled} repositories")
