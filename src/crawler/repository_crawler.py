@@ -1,7 +1,7 @@
 import time
 import logging
 from typing import List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from .github_client import GitHubClient, Repository
 from src.database.models import DatabaseManager
 
@@ -12,41 +12,69 @@ class RepositoryCrawler:
         self.github_client = github_client
         self.db_manager = db_manager
         self.seen_repository_ids = set()
+        self.logger = logging.getLogger(__name__)
+        self.start_time = None
 
-    def adaptive_sleep(self):
-        """Dynamically calculates sleep time to avoid rate limiting."""
-        remaining = self.github_client.rate_limit_remaining
-        cost = self.github_client.last_query_cost
-        
-        # If we have plenty of requests left, no need to sleep long
-        if remaining > 1000:
-            time.sleep(0.1) # A minimal polite sleep
+    def adaptive_sleep(self, remaining, reset_at, cost):
+        """Sleep to maintain a buffer of requests and spread load."""
+        buffer = 500  # Target a buffer of 500 points.
+
+        if remaining < buffer:
+            time_to_reset = (reset_at - datetime.now(timezone.utc)).total_seconds()
+            self.logger.warning(
+                f"Rate limit remaining ({remaining}) is below buffer ({buffer}). "
+                f"Waiting for reset in {time_to_reset:.0f}s."
+            )
+            if time_to_reset > 0:
+                time.sleep(time_to_reset + 5)  # Wait for reset and a bit more
             return
 
-        # If we are getting low, calculate sleep time more carefully
-        time_to_reset = self.github_client.rate_limit_reset - time.time()
-        
-        if time_to_reset <= 0:
-            time.sleep(1) # Reset time has passed, sleep a bit just in case
+        # If we have plenty of budget, don't sleep at all.
+        if remaining > 4500:
             return
-            
-        # Calculate how many requests we can make per second, leaving a buffer
-        safe_remaining = max(0, remaining - 100) 
-        requests_per_sec = safe_remaining / time_to_reset
-        
-        # If our budget is less than 2 requests per second, we need to slow down
-        if requests_per_sec < 2:
-            # Calculate sleep time to spread requests evenly until the reset
-            sleep_for = (1 / requests_per_sec) * cost
-            # Cap sleep time to avoid excessively long waits between requests
-            sleep_for = min(sleep_for, 15) 
-            logger.info(f"Rate limit low ({remaining} left). Throttling requests. Sleeping for {sleep_for:.2f}s.")
-            time.sleep(sleep_for)
-        else:
-            # We can afford to go faster
-            time.sleep(0.25) # Sleep a bit to be polite
-        
-    def crawl_repositories(self, target_count: int = 100000, batch_size: int = 100) -> int:
+
+        # We have between `buffer` and 4500 points.
+        # Let's calculate a sleep time that spreads the requests over the remaining time.
+        time_to_reset = (reset_at - datetime.now(timezone.utc)).total_seconds()
+        if time_to_reset <= 1:
+            return  # No point in sleeping if window is about to reset
+
+        # How many points can we use?
+        points_to_use = remaining - buffer
+
+        # How many requests can we make? (estimated)
+        # Use max(cost, 1) to avoid division by zero if cost is 0 for some reason.
+        num_requests_possible = points_to_use / max(cost, 1)
+
+        if num_requests_possible <= 1:
+            # Not enough points for even one more request, wait for reset.
+            self.logger.warning(
+                "Not enough rate limit points for next request. Waiting for reset."
+            )
+            if time_to_reset > 0:
+                time.sleep(time_to_reset + 5)
+            return
+
+        # Spread these requests over the remaining time.
+        # Time per request.
+        time_per_request = time_to_reset / num_requests_possible
+
+        # The loop itself takes time. Let's subtract an estimate for that.
+        loop_overhead = 2.0
+        sleep_duration = max(0, time_per_request - loop_overhead)
+
+        # Cap the sleep to something reasonable, e.g. 15 seconds.
+        sleep_duration = min(sleep_duration, 15)
+
+        if sleep_duration > 0.1:  # Only log if sleep is meaningful
+            self.logger.info(
+                f"Throttling: {remaining} points left. "
+                f"Sleeping for {sleep_duration:.2f}s to spread load."
+            )
+            time.sleep(sleep_duration)
+
+    def crawl_repositories(self, max_repos=100000):
+        """
         total_crawled = 0
         consecutive_errors = 0
         max_consecutive_errors = 10
