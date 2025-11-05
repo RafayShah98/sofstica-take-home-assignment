@@ -1,6 +1,9 @@
 name: GitHub Repository Crawler
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
   schedule:
     - cron: "0 2 * * *" # Run daily at 2 AM UTC
