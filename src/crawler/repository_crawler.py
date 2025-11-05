@@ -113,6 +113,7 @@ class RepositoryCrawler:
 
             while has_more_pages and total_crawled < max_repos:
                 try:
+                    self.logger.info(f"Fetching a batch of repositories with cursor: {cursor}")
                     # The github client needs to return rate limit info
                     repositories, cursor, rate_limit_info = self.github_client.get_repositories_by_date(
                         date_str, cursor, batch_size
@@ -125,6 +126,7 @@ class RepositoryCrawler:
 
                     # Filter out duplicates
                     unique_repos = [repo for repo in repositories if repo.github_id not in self.seen_repository_ids]
+                    self.logger.info(f"Found {len(unique_repos)} new repositories in this batch.")
 
                     if not unique_repos:
                         if cursor:  # If there's a next page, continue
@@ -158,6 +160,7 @@ class RepositoryCrawler:
                                      f"(Day Total: {date_total}, Grand Total: {total_crawled}/{max_repos}) | "
                                      f"Rate: {repos_per_second:.1f} repos/sec | "
                                      f"ETA: {eta_hours:.1f} hours")
+                    self.logger.info(f"Progress: {total_crawled}/{max_repos} repositories crawled.")
 
                     # Adaptive delay to avoid hitting rate limits
                     self.adaptive_sleep(rate_limit_info)
