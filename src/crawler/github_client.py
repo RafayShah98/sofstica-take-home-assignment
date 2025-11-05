@@ -35,19 +35,15 @@ class GitHubClient:
         self.rate_limit_remaining = 5000
         self.rate_limit_reset = 0
         
-    def _make_request(self, query: str, cursor: Optional[str] = None) -> Dict:
+    def _make_request(self, query: str, variables: Dict = None) -> Dict:
         headers = {
             "Authorization": f"Bearer {self.token}" if self.token else "",
             "Content-Type": "application/json",
         }
         
-        variables = {}
-        if cursor:
-            variables["cursor"] = cursor
-            
         payload = {
             "query": query,
-            "variables": variables
+            "variables": variables or {}
         }
         
         retry_count = 0
@@ -113,11 +109,17 @@ class GitHubClient:
         
         raise Exception("Max retries exceeded for GitHub API request")
     
-    def get_repositories_batch(self, cursor: Optional[str] = None, batch_size: int = 100) -> tuple[List[Repository], Optional[str]]:
+    def get_repositories_by_stars_range(self, min_stars: int, max_stars: int, cursor: Optional[str] = None, batch_size: int = 100) -> tuple[List[Repository], Optional[str]]:
+        """Get repositories by stars range to work around 1000 result limit"""
+        if min_stars == max_stars:
+            stars_query = f"stars:{min_stars}"
+        else:
+            stars_query = f"stars:{min_stars}..{max_stars}"
+        
         query = """
-        query($cursor: String) {
+        query($cursor: String, $query: String!) {
           search(
-            query: "stars:>0 sort:updated-desc"
+            query: $query
             type: REPOSITORY
             first: %d
             after: $cursor
@@ -166,7 +168,13 @@ class GitHubClient:
         }
         """ % batch_size
         
-        data = self._make_request(query, cursor)
+        search_query = f"{stars_query} sort:updated-desc"
+        variables = {
+            "query": search_query,
+            "cursor": cursor
+        }
+        
+        data = self._make_request(query, variables)
         
         if not data or 'data' not in data:
             logger.error("Invalid response data")
@@ -200,8 +208,103 @@ class GitHubClient:
         page_info = search_data['pageInfo']
         next_cursor = page_info['endCursor'] if page_info['hasNextPage'] else None
         
-        # Log repository count if available
         if 'repositoryCount' in search_data:
-            logger.debug(f"Total repositories in search: {search_data['repositoryCount']}")
+            logger.debug(f"Found {search_data['repositoryCount']} repositories for stars {min_stars}-{max_stars}")
+        
+        return repositories, next_cursor
+    
+    def get_repositories_by_language(self, language: str, cursor: Optional[str] = None, batch_size: int = 100) -> tuple[List[Repository], Optional[str]]:
+        """Get repositories by programming language"""
+        query = """
+        query($cursor: String, $query: String!) {
+          search(
+            query: $query
+            type: REPOSITORY
+            first: %d
+            after: $cursor
+          ) {
+            repositoryCount
+            edges {
+              node {
+                ... on Repository {
+                  id
+                  name
+                  owner {
+                    login
+                  }
+                  nameWithOwner
+                  description
+                  stargazerCount
+                  forkCount
+                  issues(states: OPEN) {
+                    totalCount
+                  }
+                  primaryLanguage {
+                    name
+                  }
+                  createdAt
+                  updatedAt
+                  pushedAt
+                  diskUsage
+                  isArchived
+                  isDisabled
+                  licenseInfo {
+                    key
+                  }
+                }
+              }
+            }
+            pageInfo {
+              hasNextPage
+              endCursor
+            }
+          }
+          rateLimit {
+            cost
+            remaining
+            resetAt
+          }
+        }
+        """ % batch_size
+        
+        search_query = f"language:{language} stars:>1 sort:updated-desc"
+        variables = {
+            "query": search_query,
+            "cursor": cursor
+        }
+        
+        data = self._make_request(query, variables)
+        
+        if not data or 'data' not in data:
+            logger.error("Invalid response data")
+            return [], None
+            
+        search_data = data['data']['search']
+        
+        repositories = []
+        for edge in search_data['edges']:
+            node = edge['node']
+            repo = Repository(
+                github_id=node['id'],
+                name=node['name'],
+                owner_login=node['owner']['login'],
+                full_name=node['nameWithOwner'],
+                description=node['description'],
+                stargazers_count=node['stargazerCount'],
+                forks_count=node['forkCount'],
+                open_issues_count=node['issues']['totalCount'],
+                language=node['primaryLanguage']['name'] if node['primaryLanguage'] else None,
+                created_at=node['createdAt'],
+                updated_at=node['updatedAt'],
+                pushed_at=node['pushedAt'],
+                size=node['diskUsage'],
+                archived=node['isArchived'],
+                disabled=node['isDisabled'],
+                license_info=node['licenseInfo']['key'] if node['licenseInfo'] else None
+            )
+            repositories.append(repo)
+        
+        page_info = search_data['pageInfo']
+        next_cursor = page_info['endCursor'] if page_info['hasNextPage'] else None
         
         return repositories, next_cursor
