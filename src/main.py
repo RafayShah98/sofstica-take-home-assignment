@@ -30,7 +30,7 @@ def print_banner():
     print("🚀 GITHUB REPOSITORY CRAWLER")
     print("="*80)
     print("📊 Target: 100,000 repositories")
-    print("💾 Database: SQLite")
+    print("💾 Database: PostgreSQL")
     print("🔑 GitHub API: Authenticated")
     print("="*80 + "\n")
 
@@ -43,7 +43,7 @@ def print_summary(total_crawled, start_time, csv_path):
     print(f"✅ Status: COMPLETED")
     print(f"📈 Repositories Crawled: {total_crawled:,}")
     print(f"⏱️  Total Time: {total_time/3600:.2f} hours")
-    print(f"🚀 Average Speed: {total_crawled/total_time:.1f} repos/sec")
+    print(f"🚀 Average Speed: {total_crawled/total_time:.1f} repos/sec" if total_time > 0 else "N/A")
     print(f"💾 Data Exported: {csv_path}")
     print("="*80)
 
@@ -74,7 +74,7 @@ def main():
                 print("🔄 Beginning crawl process...")
                 total_crawled = crawler.crawl_repositories(max_repos=100000, batch_size=100)
                 
-                # Export data to CSV
+                # Export data to CSV - FIXED: Use export_to_csv method
                 print("\n💾 Exporting data to CSV...")
                 output_csv_path = "repositories_export.csv"
                 db_manager.export_to_csv(output_csv_path)
