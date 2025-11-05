@@ -24,7 +24,7 @@ class RepositoryCrawler:
         if current == total:
             print()
 
-    def print_status(self, current, total, date_str, batch_size, rate_limit):
+    def print_status(self, current, total, strategy, batch_size, rate_limit):
         """Print detailed status to console"""
         elapsed = time.time() - self.start_time
         rate = current / elapsed if elapsed > 0 else 0
@@ -33,7 +33,7 @@ class RepositoryCrawler:
         
         print("\n" + "="*80)
         print(f"📊 CRAWLING STATUS")
-        print(f"🔄 Current Date: {date_str}")
+        print(f"🔄 Strategy: {strategy}")
         print(f"📈 Progress: {current:,} / {total:,} repositories ({current/total*100:.1f}%)")
         print(f"⏱️  Elapsed: {elapsed/3600:.1f}h | ETA: {eta_hours:.1f}h")
         print(f"🚀 Speed: {rate:.1f} repos/sec")
@@ -44,76 +44,28 @@ class RepositoryCrawler:
     def adaptive_sleep(self, rate_limit_info):
         """Sleep to maintain a buffer of requests and spread load."""
         if not rate_limit_info:
+            time.sleep(1)  # Default sleep
             return
 
-        remaining = rate_limit_info.get("remaining")
-        reset_at_str = rate_limit_info.get("resetAt")
-        cost = rate_limit_info.get("cost")
-
-        if remaining is None or reset_at_str is None or cost is None:
-            return
-
-        reset_at = datetime.fromisoformat(reset_at_str.replace("Z", "+00:00"))
-        buffer = 500  # Target a buffer of 500 points.
-
-        if remaining < buffer:
-            time_to_reset = (reset_at - datetime.now(timezone.utc)).total_seconds()
-            print(f"⚠️  RATE LIMIT WARNING: Only {remaining} points left. Waiting {time_to_reset:.0f}s for reset...")
-            if time_to_reset > 0:
-                time.sleep(time_to_reset + 5)
-            return
-
-        # If we have plenty of budget, don't sleep at all.
-        if remaining > 4500:
-            return
-
-        # We have between `buffer` and 4500 points.
-        # Let's calculate a sleep time that spreads the requests over the remaining time.
-        time_to_reset = (reset_at - datetime.now(timezone.utc)).total_seconds()
-        if time_to_reset <= 1:
-            return  # No point in sleeping if window is about to reset
-
-        # How many points can we use?
-        points_to_use = remaining - buffer
-
-        # How many requests can we make? (estimated)
-        # Use max(cost, 1) to avoid division by zero if cost is 0 for some reason.
-        num_requests_possible = points_to_use / max(cost, 1)
-
-        if num_requests_possible <= 1:
-            # Not enough points for even one more request, wait for reset.
-            print(f"⚠️  RATE LIMIT CRITICAL: Not enough points. Waiting for reset...")
-            if time_to_reset > 0:
-                time.sleep(time_to_reset + 5)
-            return
-
-        # Spread these requests over the remaining time.
-        # Time per request.
-        time_per_request = time_to_reset / num_requests_possible
-
-        # The loop itself takes time. Let's subtract an estimate for that.
-        loop_overhead = 2.0
-        sleep_duration = max(0, time_per_request - loop_overhead)
-
-        # Cap the sleep to something reasonable, e.g. 15 seconds.
-        sleep_duration = min(sleep_duration, 15)
-
-        if sleep_duration > 0.1:  # Only log if sleep is meaningful
-            print(f"⏸️  Throttling: {remaining} points left. Sleeping {sleep_duration:.1f}s...")
-            time.sleep(sleep_duration)
+        remaining = rate_limit_info.get("remaining", 5000)
+        
+        # Simple sleep logic based on remaining rate limit
+        if remaining < 100:
+            print("⚠️  Low rate limit, sleeping 30 seconds...")
+            time.sleep(30)
+        elif remaining < 500:
+            print("⏸️  Medium rate limit, sleeping 5 seconds...")
+            time.sleep(5)
+        else:
+            time.sleep(1)  # Normal delay
 
     def crawl_repositories(self, max_repos=100000, batch_size=100):
         """
-        Crawls GitHub repositories day by day, going backward in time,
-        and stores them in the database.
-
-        Args:
-            max_repos (int): The maximum number of repositories to crawl.
-            batch_size (int): The number of repositories to fetch per API request.
+        Crawls GitHub repositories using multiple search strategies
         """
         total_crawled = 0
         consecutive_errors = 0
-        max_consecutive_errors = 10
+        max_consecutive_errors = 5
 
         print("🚀 STARTING GITHUB REPOSITORY CRAWLER")
         print(f"🎯 TARGET: {max_repos:,} repositories")
@@ -122,30 +74,85 @@ class RepositoryCrawler:
         
         self.start_time = time.time()
 
-        # Start from today and go back in time
-        current_date = datetime.utcnow()
+        # Multiple search strategies to get around API limitations
+        search_strategies = [
+            self._crawl_by_stars,
+            self._crawl_by_language,
+            self._crawl_by_recently_updated,
+        ]
 
-        while total_crawled < max_repos:
-            date_str = current_date.strftime('%Y-%m-%d')
-            print(f"\n📅 CRAWLING DATE: {date_str}")
-            print(f"📊 CURRENT TOTAL: {total_crawled:,} / {max_repos:,}")
+        for strategy in search_strategies:
+            if total_crawled >= max_repos:
+                break
+                
+            try:
+                print(f"\n🎯 EXECUTING STRATEGY: {strategy.__name__}")
+                strategy_crawled = strategy(max_repos - total_crawled, batch_size)
+                total_crawled += strategy_crawled
+                consecutive_errors = 0
+                print(f"✅ Strategy completed: {strategy_crawled:,} repos (Total: {total_crawled:,})")
+                
+            except Exception as e:
+                consecutive_errors += 1
+                print(f"❌ Strategy failed: {e}")
+                if consecutive_errors >= max_consecutive_errors:
+                    print("💥 Too many consecutive errors, stopping crawl.")
+                    break
 
+        total_time = time.time() - self.start_time
+        print("\n" + "="*80)
+        print(f"🎉 CRAWLING COMPLETED!")
+        print(f"📈 Total repositories crawled: {total_crawled:,}")
+        print(f"⏱️  Total time: {total_time/3600:.2f} hours")
+        print(f"🚀 Average speed: {total_crawled/total_time:.1f} repos/sec" if total_time > 0 else "N/A")
+        print("="*80)
+        
+        return total_crawled
+
+    def _crawl_by_stars(self, target_count, batch_size):
+        """Crawl repositories by different star ranges"""
+        print("⭐ CRAWLING BY STAR RANGES")
+        
+        star_ranges = [
+            (10000, None),  # 10k+ stars
+            (5000, 9999),   # 5k-9,999 stars
+            (1000, 4999),   # 1k-4,999 stars
+            (500, 999),     # 500-999 stars
+            (100, 499),     # 100-499 stars
+            (50, 99),       # 50-99 stars
+            (10, 49),       # 10-49 stars
+            (1, 9),         # 1-9 stars
+        ]
+        
+        total_crawled = 0
+        
+        for min_stars, max_stars in star_ranges:
+            if total_crawled >= target_count:
+                break
+                
+            if max_stars:
+                star_query = f"stars:{min_stars}..{max_stars}"
+            else:
+                star_query = f"stars:>={min_stars}"
+                
+            print(f"  🔍 Searching: {star_query}")
+            
             cursor = None
-            date_total = 0
             has_more_pages = True
             page_number = 1
-
-            while has_more_pages and total_crawled < max_repos:
+            
+            while has_more_pages and total_crawled < target_count:
                 try:
-                    print(f"\n📄 Fetching page {page_number} for {date_str}...")
+                    print(f"    📄 Page {page_number}...")
                     
-                    # The github client needs to return rate limit info
-                    repositories, cursor, rate_limit_info = self.github_client.get_repositories_by_date(
-                        date_str, cursor, batch_size
+                    repositories, cursor, rate_limit_info = self.github_client.search_repositories(
+                        query=star_query, 
+                        cursor=cursor, 
+                        batch_size=batch_size
                     )
 
                     if not repositories:
-                        print(f"❌ No repositories found for {date_str}")
+                        print(f"    ✅ No more repositories for {star_query}")
                         has_more_pages = False
                         break
 
@@ -153,75 +160,200 @@ class RepositoryCrawler:
                     unique_repos = [repo for repo in repositories if repo.github_id not in self.seen_repository_ids]
 
                     if not unique_repos:
-                        if cursor:  # If there's a next page, continue
-                            print(f"🔄 No new repos this page, but more pages exist. Continuing...")
+                        if cursor:
+                            print(f"    🔄 No new repos this page, continuing...")
                             page_number += 1
                             self.adaptive_sleep(rate_limit_info)
                             continue
-                        else: # No more pages for this date
-                            print(f"✅ All repositories for {date_str} are already processed.")
+                        else:
+                            print(f"    ✅ All repositories for {star_query} are processed")
                             has_more_pages = False
                             break
 
-                    # Upsert repositories
-                    print(f"💾 Saving {len(unique_repos)} new repositories to database...")
+                    # Save to database
                     self.db_manager.upsert_repositories(unique_repos)
-
+                    
                     # Update tracking
                     for repo in unique_repos:
                         self.seen_repository_ids.add(repo.github_id)
 
-                    date_total += len(unique_repos)
-                    total_crawled += len(unique_repos)
-                    consecutive_errors = 0
+                    batch_crawled = len(unique_repos)
+                    total_crawled += batch_crawled
 
-                    # Print detailed status
-                    self.print_status(total_crawled, max_repos, date_str, batch_size, 
-                                    rate_limit_info.get("remaining", "Unknown") if rate_limit_info else "Unknown")
+                    # Print progress
+                    self.print_status(total_crawled, target_count, f"Stars {star_query}", 
+                                    batch_size, rate_limit_info.get("remaining", "Unknown") if rate_limit_info else "Unknown")
+                    
+                    self.print_progress_bar(total_crawled, target_count, 
+                                          prefix=f'Stars {min_stars}+', 
+                                          suffix=f'Page {page_number}')
 
-                    # Print progress bar
-                    self.print_progress_bar(total_crawled, max_repos, 
-                                          prefix=f'Progress {date_str}', 
-                                          suffix=f'Page {page_number} | {date_total} today')
-
-                    # Adaptive delay to avoid hitting rate limits
+                    # Rate limit handling
                     self.adaptive_sleep(rate_limit_info)
 
                     if not cursor:
-                        print(f"✅ Completed all pages for {date_str}")
+                        print(f"    ✅ Completed all pages for {star_query}")
                         has_more_pages = False
                     else:
                         page_number += 1
 
                 except Exception as e:
-                    consecutive_errors += 1
-                    print(f"❌ ERROR on page {page_number} for {date_str}: {e}")
-                    print(f"🔄 Attempt {consecutive_errors}/{max_consecutive_errors}")
+                    print(f"    ❌ Error: {e}")
+                    break
 
-                    if consecutive_errors >= max_consecutive_errors:
-                        print("💥 TOO MANY ERRORS - STOPPING CRAWL")
-                        return total_crawled
+        return total_crawled
 
-                    backoff_time = min(60 * consecutive_errors, 300)
-                    print(f"⏸️  Retrying in {backoff_time} seconds...")
-                    time.sleep(backoff_time)
-                    continue
+    def _crawl_by_language(self, target_count, batch_size):
+        """Crawl repositories by programming language"""
+        print("💻 CRAWLING BY PROGRAMMING LANGUAGES")
+        
+        languages = [
+            "JavaScript", "Python", "Java", "TypeScript", "C++", 
+            "C#", "PHP", "C", "Shell", "Ruby", "Go", "Rust"
+        ]
+        
+        total_crawled = 0
+        
+        for language in languages:
+            if total_crawled >= target_count:
+                break
+                
+            print(f"  🔍 Searching language: {language}")
+            
+            cursor = None
+            has_more_pages = True
+            page_number = 1
+            
+            while has_more_pages and total_crawled < target_count:
+                try:
+                    print(f"    📄 Page {page_number}...")
+                    
+                    repositories, cursor, rate_limit_info = self.github_client.search_repositories(
+                        query=f"language:{language} stars:>1", 
+                        cursor=cursor, 
+                        batch_size=batch_size
+                    )
 
-            # Move to the previous day
-            current_date -= timedelta(days=1)
-            print(f"\n⏭️  Moving to previous day: {current_date.strftime('%Y-%m-%d')}")
+                    if not repositories:
+                        print(f"    ✅ No more {language} repositories")
+                        has_more_pages = False
+                        break
 
-            # Stop if we go too far back in time (e.g., before GitHub existed)
-            if current_date.year < 2008:
-                print("🛑 Reached the beginning of GitHub history (2008)")
+                    # Filter out duplicates
+                    unique_repos = [repo for repo in repositories if repo.github_id not in self.seen_repository_ids]
+
+                    if not unique_repos:
+                        if cursor:
+                            print(f"    🔄 No new {language} repos this page, continuing...")
+                            page_number += 1
+                            self.adaptive_sleep(rate_limit_info)
+                            continue
+                        else:
+                            print(f"    ✅ All {language} repositories are processed")
+                            has_more_pages = False
+                            break
+
+                    # Save to database
+                    self.db_manager.upsert_repositories(unique_repos)
+                    
+                    # Update tracking
+                    for repo in unique_repos:
+                        self.seen_repository_ids.add(repo.github_id)
+
+                    batch_crawled = len(unique_repos)
+                    total_crawled += batch_crawled
+
+                    # Print progress
+                    self.print_status(total_crawled, target_count, f"Language {language}", 
+                                    batch_size, rate_limit_info.get("remaining", "Unknown") if rate_limit_info else "Unknown")
+                    
+                    self.print_progress_bar(total_crawled, target_count, 
+                                          prefix=f'Language {language}', 
+                                          suffix=f'Page {page_number}')
+
+                    # Rate limit handling
+                    self.adaptive_sleep(rate_limit_info)
+
+                    if not cursor:
+                        print(f"    ✅ Completed all pages for {language}")
+                        has_more_pages = False
+                    else:
+                        page_number += 1
+
+                except Exception as e:
+                    print(f"    ❌ Error with {language}: {e}")
+                    break
+
+        return total_crawled
+
+    def _crawl_by_recently_updated(self, target_count, batch_size):
+        """Crawl recently updated repositories"""
+        print("🕒 CRAWLING RECENTLY UPDATED REPOSITORIES")
+        
+        total_crawled = 0
+        
+        cursor = None
+        has_more_pages = True
+        page_number = 1
+        
+        while has_more_pages and total_crawled < target_count:
+            try:
+                print(f"  📄 Page {page_number}...")
+                
+                repositories, cursor, rate_limit_info = self.github_client.search_repositories(
+                    query="stars:>1 sort:updated-desc", 
+                    cursor=cursor, 
+                    batch_size=batch_size
+                )
+
+                if not repositories:
+                    print("  ✅ No more recently updated repositories")
+                    has_more_pages = False
+                    break
+
+                # Filter out duplicates
+                unique_repos = [repo for repo in repositories if repo.github_id not in self.seen_repository_ids]
+
+                if not unique_repos:
+                    if cursor:
+                        print("  🔄 No new repos this page, continuing...")
+                        page_number += 1
+                        self.adaptive_sleep(rate_limit_info)
+                        continue
+                    else:
+                        print("  ✅ All recently updated repositories are processed")
+                        has_more_pages = False
+                        break
+
+                # Save to database
+                self.db_manager.upsert_repositories(unique_repos)
+                
+                # Update tracking
+                for repo in unique_repos:
+                    self.seen_repository_ids.add(repo.github_id)
+
+                batch_crawled = len(unique_repos)
+                total_crawled += batch_crawled
+
+                # Print progress
+                self.print_status(total_crawled, target_count, "Recently Updated", 
+                                batch_size, rate_limit_info.get("remaining", "Unknown") if rate_limit_info else "Unknown")
+                
+                self.print_progress_bar(total_crawled, target_count, 
+                                      prefix='Recently Updated', 
+                                      suffix=f'Page {page_number}')
+
+                # Rate limit handling
+                self.adaptive_sleep(rate_limit_info)
+
+                if not cursor:
+                    print("  ✅ Completed all pages for recently updated")
+                    has_more_pages = False
+                else:
+                    page_number += 1
+
+            except Exception as e:
+                print(f"  ❌ Error: {e}")
                 break
 
-        total_time = time.time() - self.start_time
-        print("\n" + "="*80)
-        print(f"🎉 CRAWLING COMPLETED!")
-        print(f"📈 Total repositories crawled: {total_crawled:,}")
-        print(f"⏱️  Total time: {total_time/3600:.2f} hours")
-        print(f"🚀 Average speed: {total_crawled/total_time:.1f} repos/sec")
-        print("="*80)
-        
         return total_crawled

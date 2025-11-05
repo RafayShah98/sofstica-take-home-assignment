@@ -1,7 +1,7 @@
 import os
 import time
 import requests
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 import logging
 from datetime import datetime, timezone
@@ -36,6 +36,27 @@ class GitHubClient:
         self.rate_limit_remaining = 5000
         self.rate_limit_reset = 0
         self.last_query_cost = 1  # Default cost
+
+    def _to_repository(self, node: Dict) -> Repository:
+        """Convert GraphQL node to Repository object"""
+        return Repository(
+            github_id=node.get('id', ''),
+            name=node.get('name', '') if 'name' in node else node.get('nameWithOwner', '').split('/')[-1],
+            owner_login=node.get('owner', {}).get('login', '') if 'owner' in node else node.get('nameWithOwner', '').split('/')[0],
+            full_name=node.get('nameWithOwner', ''),
+            description=node.get('description'),
+            stargazers_count=node.get('stargazerCount', 0),
+            forks_count=node.get('forkCount', 0),
+            open_issues_count=node.get('issues', {}).get('totalCount', 0) if 'issues' in node else 0,
+            language=node.get('primaryLanguage', {}).get('name') if node.get('primaryLanguage') else None,
+            created_at=node.get('createdAt', ''),
+            updated_at=node.get('updatedAt', ''),
+            pushed_at=node.get('pushedAt', ''),
+            size=node.get('diskUsage', 0),
+            archived=node.get('isArchived', False),
+            disabled=node.get('isDisabled', False),
+            license_info=node.get('licenseInfo', {}).get('key') if node.get('licenseInfo') else None
+        )
 
     def _make_request(self, query: str, variables: Dict = None) -> Dict:
         headers = {
@@ -132,15 +153,10 @@ class GitHubClient:
                     raise
         
         raise Exception("Max retries exceeded for GitHub API request")
-    
-    def get_repositories_by_stars_range(self, min_stars: int, max_stars: int, cursor: Optional[str] = None, batch_size: int = 100) -> tuple[List[Repository], Optional[str]]:
-        """Get repositories by stars range to work around 1000 result limit"""
-        if min_stars == max_stars:
-            stars_query = f"stars:{min_stars}"
-        else:
-            stars_query = f"stars:{min_stars}..{max_stars}"
-        
-        query = """
+
+    def search_repositories(self, query: str, cursor: Optional[str] = None, batch_size: int = 100) -> Tuple[List[Repository], Optional[str], Dict]:
+        """Generic repository search with any query"""
+        graphql_query = """
         query($cursor: String, $query: String!) {
           search(
             query: $query
@@ -192,209 +208,55 @@ class GitHubClient:
         }
         """ % batch_size
         
-        search_query = f"{stars_query} sort:updated-desc"
         variables = {
-            "query": search_query,
+            "query": query,
             "cursor": cursor
         }
         
-        data = self._make_request(query, variables)
+        data = self._make_request(graphql_query, variables)
         
         if not data or 'data' not in data:
             logger.error("Invalid response data")
-            return [], None
+            return [], None, {}
             
         search_data = data['data']['search']
+        rate_limit_info = data['data'].get('rateLimit', {})
         
         repositories = []
         for edge in search_data['edges']:
             node = edge['node']
-            repo = Repository(
-                github_id=node['id'],
-                name=node['name'],
-                owner_login=node['owner']['login'],
-                full_name=node['nameWithOwner'],
-                description=node['description'],
-                stargazers_count=node['stargazerCount'],
-                forks_count=node['forkCount'],
-                open_issues_count=node['issues']['totalCount'],
-                language=node['primaryLanguage']['name'] if node['primaryLanguage'] else None,
-                created_at=node['createdAt'],
-                updated_at=node['updatedAt'],
-                pushed_at=node['pushedAt'],
-                size=node['diskUsage'],
-                archived=node['isArchived'],
-                disabled=node['isDisabled'],
-                license_info=node['licenseInfo']['key'] if node['licenseInfo'] else None
-            )
+            repo = self._to_repository(node)
             repositories.append(repo)
         
         page_info = search_data['pageInfo']
         next_cursor = page_info['endCursor'] if page_info['hasNextPage'] else None
         
         if 'repositoryCount' in search_data:
-            logger.debug(f"Found {search_data['repositoryCount']} repositories for stars {min_stars}-{max_stars}")
+            logger.debug(f"Found {search_data['repositoryCount']} repositories for query: {query}")
         
-        return repositories, next_cursor
+        return repositories, next_cursor, rate_limit_info
     
-    def get_repositories_by_date(self, date_str: str, cursor: Optional[str] = None, batch_size: int = 100):
-        """
-        Fetches repositories created on a specific date.
-
-        Args:
-            date_str (str): The date in 'YYYY-MM-DD' format.
-            cursor (str, optional): The cursor for pagination.
-            batch_size (int, optional): The number of repositories to fetch.
-
-        Returns:
-            A tuple containing:
-            - A list of Repository objects.
-            - The end cursor for the next page, or None.
-            - A dictionary with rate limit information.
-        """
-        query = """
-        query($searchQuery: String!, $cursor: String, $first: Int) {
-            rateLimit {
-                limit
-                cost
-                remaining
-                resetAt
-            }
-            search(query: $searchQuery, type: REPOSITORY, first: $first, after: $cursor) {
-                repositoryCount
-                pageInfo {
-                    endCursor
-                    hasNextPage
-                }
-                nodes {
-                    ... on Repository {
-                        id
-                        nameWithOwner
-                        url
-                        description
-                        stargazerCount
-                        forkCount
-                        pushedAt
-                        createdAt
-                        primaryLanguage {
-                            name
-                        }
-                    }
-                }
-            }
-        }
-        """
-        search_query = f"created:{date_str}"
-        variables = {"searchQuery": search_query, "cursor": cursor, "first": batch_size}
-
-        response_data = self._make_request(query, variables)
-
-        if not response_data or "search" not in response_data:
-            return [], None, response_data.get("rateLimit") if response_data else None
-
-        search_results = response_data["search"]
-        rate_limit = response_data.get("rateLimit")
-        repositories = [
-            self._to_repository(node) for node in search_results.get("nodes", []) if node
-        ]
-        page_info = search_results.get("pageInfo", {})
-        end_cursor = page_info.get("endCursor")
-        has_next_page = page_info.get("hasNextPage", False)
-
-        return repositories, end_cursor if has_next_page else None, rate_limit
-
-    def get_repositories_by_language(self, language: str, cursor: Optional[str] = None):
+    def get_repositories_by_stars_range(self, min_stars: int, max_stars: int, cursor: Optional[str] = None, batch_size: int = 100) -> Tuple[List[Repository], Optional[str], Dict]:
+        """Get repositories by stars range to work around 1000 result limit"""
+        if min_stars == max_stars:
+            stars_query = f"stars:{min_stars}"
+        else:
+            stars_query = f"stars:{min_stars}..{max_stars}"
+        
+        search_query = f"{stars_query} sort:updated-desc"
+        return self.search_repositories(search_query, cursor, batch_size)
+    
+    def get_repositories_by_date(self, date_str: str, cursor: Optional[str] = None, batch_size: int = 100) -> Tuple[List[Repository], Optional[str], Dict]:
+        """Get repositories created on a specific date"""
+        search_query = f"created:{date_str} sort:updated-desc"
+        return self.search_repositories(search_query, cursor, batch_size)
+    
+    def get_repositories_by_language(self, language: str, cursor: Optional[str] = None, batch_size: int = 100) -> Tuple[List[Repository], Optional[str], Dict]:
         """Get repositories by programming language"""
-        query = """
-        query($cursor: String, $query: String!) {
-          search(
-            query: $query
-            type: REPOSITORY
-            first: %d
-            after: $cursor
-          ) {
-            repositoryCount
-            edges {
-              node {
-                ... on Repository {
-                  id
-                  name
-                  owner {
-                    login
-                  }
-                  nameWithOwner
-                  description
-                  stargazerCount
-                  forkCount
-                  issues(states: OPEN) {
-                    totalCount
-                  }
-                  primaryLanguage {
-                    name
-                  }
-                  createdAt
-                  updatedAt
-                  pushedAt
-                  diskUsage
-                  isArchived
-                  isDisabled
-                  licenseInfo {
-                    key
-                  }
-                }
-              }
-            }
-            pageInfo {
-              hasNextPage
-              endCursor
-            }
-          }
-          rateLimit {
-            cost
-            remaining
-            resetAt
-          }
-        }
-        """ % batch_size
-        
         search_query = f"language:{language} stars:>1 sort:updated-desc"
-        variables = {
-            "query": search_query,
-            "cursor": cursor
-        }
-        
-        data = self._make_request(query, variables)
-        
-        if not data or 'data' not in data:
-            logger.error("Invalid response data")
-            return [], None
-            
-        search_data = data['data']['search']
-        
-        repositories = []
-        for edge in search_data['edges']:
-            node = edge['node']
-            repo = Repository(
-                github_id=node['id'],
-                name=node['name'],
-                owner_login=node['owner']['login'],
-                full_name=node['nameWithOwner'],
-                description=node['description'],
-                stargazers_count=node['stargazerCount'],
-                forks_count=node['forkCount'],
-                open_issues_count=node['issues']['totalCount'],
-                language=node['primaryLanguage']['name'] if node['primaryLanguage'] else None,
-                created_at=node['createdAt'],
-                updated_at=node['updatedAt'],
-                pushed_at=node['pushedAt'],
-                size=node['diskUsage'],
-                archived=node['isArchived'],
-                disabled=node['isDisabled'],
-                license_info=node['licenseInfo']['key'] if node['licenseInfo'] else None
-            )
-            repositories.append(repo)
-        
-        page_info = search_data['pageInfo']
-        next_cursor = page_info['endCursor'] if page_info['hasNextPage'] else None
-        
-        return repositories, next_cursor
+        return self.search_repositories(search_query, cursor, batch_size)
+
+    def get_repositories_by_stars(self, min_stars: int = 1, cursor: Optional[str] = None, batch_size: int = 100) -> Tuple[List[Repository], Optional[str], Dict]:
+        """Get repositories by minimum stars"""
+        search_query = f"stars:>={min_stars} sort:updated-desc"
+        return self.search_repositories(search_query, cursor, batch_size)
