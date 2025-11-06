@@ -172,7 +172,7 @@ class UltraCrawler:
         
         return await self._execute_parallel_queries(queries, target_count, batch_size)
 
-    async def _execute_parallel_queries(self, queries: List[str], target_count: int, batch_size: int) -> int:
+        async def _execute_parallel_queries(self, queries: List[str], target_count: int, batch_size: int) -> int:
         """Execute queries in parallel with conservative limits"""
         if not queries:
             return 0
@@ -206,7 +206,6 @@ class UltraCrawler:
         print(f"    📊 {crawled_count:,} new repos | Total unique: {len(self.seen_repository_ids):,} | Rate: {rate:.1f}/sec")
         
         return crawled_count
-
     def _load_existing_repository_ids(self):
         """Load existing repository IDs"""
         try:
