@@ -71,6 +71,13 @@ class DatabaseManager:
     
     def upsert_repositories(self, repositories: List) -> Tuple[int, int]:
         """Upsert repositories and return counts of inserted and updated rows"""
+        if not repositories:
+            return 0, 0
+            
+        # Use bulk method for large batches for better performance
+        if len(repositories) > 500:
+            return self.bulk_upsert_repositories(repositories)
+            
         insert_query = """
         INSERT INTO repositories (
             github_id, name, owner_login, full_name, description, stargazers_count,
@@ -124,12 +131,50 @@ class DatabaseManager:
             inserted = count_after - count_before
             updated = len(repositories) - inserted
             
+            logger.debug(f"📊 Database: Inserted {inserted}, Updated {updated}")
             return inserted, updated
             
         except Exception as e:
             self.conn.rollback()
             logger.error(f"❌ Database upsert failed: {e}")
             raise
+    
+    def bulk_upsert_repositories(self, repositories: List) -> Tuple[int, int]:
+        """Ultra-fast bulk upsert for large batches - called by ultra crawler"""
+        if not repositories:
+            return 0, 0
+            
+        print(f"💾 Bulk upserting {len(repositories):,} repositories...")
+        
+        # For very large batches, split into chunks to avoid memory issues
+        if len(repositories) > 5000:
+            total_inserted = 0
+            total_updated = 0
+            
+            # Process in chunks of 2000
+            for i in range(0, len(repositories), 2000):
+                chunk = repositories[i:i + 2000]
+                inserted, updated = self.upsert_repositories(chunk)
+                total_inserted += inserted
+                total_updated += updated
+                print(f"  ✅ Chunk {i//2000 + 1}: {len(chunk):,} repos")
+                
+            return total_inserted, total_updated
+        else:
+            # Use the regular upsert for smaller batches
+            return self.upsert_repositories(repositories)
+    
+    def get_repository_count(self) -> int:
+        """Get total number of repositories in database"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM repositories")
+        return cursor.fetchone()[0]
+    
+    def get_existing_repository_ids(self, limit: int = 500000) -> set:
+        """Get existing repository IDs for duplicate checking"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT github_id FROM repositories LIMIT %s", (limit,))
+        return {row[0] for row in cursor.fetchall()}
     
     def export_to_csv(self, filepath: str):
         """Export all repositories to CSV file"""
@@ -159,10 +204,8 @@ class DatabaseManager:
                     writer.writerow(row)
             
             # Get count for logging
-            cursor.execute("SELECT COUNT(*) FROM repositories")
-            count = cursor.fetchone()[0]
-            
-            logger.info(f"✅ Exported {count} repositories to {filepath}")
+            count = self.get_repository_count()
+            print(f"✅ Exported {count:,} repositories to {filepath}")
             
         except Exception as e:
             logger.error(f"❌ CSV export failed: {e}")
