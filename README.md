@@ -9,14 +9,21 @@ A Python application that crawls GitHub repositories using GraphQL API and store
 - Respects GitHub API rate limits with retry mechanisms
 - Daily automated runs via GitHub Actions
 - Export data to CSV/JSON formats
+- **Works with GitHub's default token (no secrets required)**
+- **Service container setup for PostgreSQL in CI/CD**
 
 ## Setup
 
 1. Clone this repository
 2. Install dependencies: `pip install -r requirements.txt`
 3. Set up PostgreSQL database
-4. Run: `python src/main.py`
+4. Run: `python main.py`
 
 ## GitHub Actions
 
-The workflow runs daily at 2 AM UTC and can be manually triggered.
+The workflow runs daily and includes:
+- ✅ PostgreSQL service container
+- ✅ Automated database setup
+- ✅ Repository crawling (100,000 repos target)
+- ✅ Data export and artifact upload
+- ✅ Works with default GitHub token
