@@ -1,23 +1,26 @@
-# config.py
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file if present
+load_dotenv()
 
 # Database configuration
-DATABASE_URL = 'postgresql://postgres:postgres@localhost:5432/github_crawler'
+DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://postgres:postgres@localhost:5432/github_crawler')
 
-# 🔑 Hardcode multiple GitHub tokens directly here
-# Replace these sample tokens with your real tokens from GitHub
-GITHUB_TOKENS = [
-    "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",
-    "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",
-    "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",
-    "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",
-    "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",
-    "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",
-]
+# Load multiple GitHub tokens if provided
+# Supports either:
+#   - GITHUB_TOKENS=token1,token2,token3  (comma-separated)
+#   - GITHUB_TOKEN=single_token
+tokens_env = os.getenv("GITHUB_TOKENS")
+if tokens_env:
+    # Split by comma and strip whitespace
+    GITHUB_TOKENS = [token.strip() for token in tokens_env.split(",") if token.strip()]
+else:
+    single_token = os.getenv("GITHUB_TOKEN")
+    if single_token:
+        GITHUB_TOKENS = [single_token]
+    else:
+        raise ValueError("❌ No GitHub token(s) found. Please set GITHUB_TOKENS or GITHUB_TOKEN.")
 
 # Optional: log how many tokens were detected
 print(f"🔑 Loaded {len(GITHUB_TOKENS)} GitHub token(s).")
-
-# (Optional) Safety check
-if not GITHUB_TOKENS:
-    raise ValueError("❌ No GitHub tokens found! Please define them in config.py")
