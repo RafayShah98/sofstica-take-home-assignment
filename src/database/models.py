@@ -74,9 +74,9 @@ class DatabaseManager:
         if not repositories:
             return 0, 0
             
-        # Use bulk method for large batches for better performance
-        if len(repositories) > 500:
-            return self.bulk_upsert_repositories(repositories)
+        # For large batches, use chunk processing to avoid recursion
+        if len(repositories) > 5000:
+            return self._chunked_upsert(repositories, chunk_size=2000)
             
         insert_query = """
         INSERT INTO repositories (
@@ -139,30 +139,23 @@ class DatabaseManager:
             logger.error(f"❌ Database upsert failed: {e}")
             raise
     
-    def bulk_upsert_repositories(self, repositories: List) -> Tuple[int, int]:
-        """Ultra-fast bulk upsert for large batches - called by ultra crawler"""
-        if not repositories:
-            return 0, 0
-            
-        print(f"💾 Bulk upserting {len(repositories):,} repositories...")
+    def _chunked_upsert(self, repositories: List, chunk_size: int = 2000) -> Tuple[int, int]:
+        """Process large batches in chunks to avoid recursion and memory issues"""
+        total_inserted = 0
+        total_updated = 0
         
-        # For very large batches, split into chunks to avoid memory issues
-        if len(repositories) > 5000:
-            total_inserted = 0
-            total_updated = 0
+        for i in range(0, len(repositories), chunk_size):
+            chunk = repositories[i:i + chunk_size]
+            inserted, updated = self.upsert_repositories(chunk)
+            total_inserted += inserted
+            total_updated += updated
+            print(f"  ✅ Chunk {i//chunk_size + 1}: {len(chunk):,} repos")
             
-            # Process in chunks of 2000
-            for i in range(0, len(repositories), 2000):
-                chunk = repositories[i:i + 2000]
-                inserted, updated = self.upsert_repositories(chunk)
-                total_inserted += inserted
-                total_updated += updated
-                print(f"  ✅ Chunk {i//2000 + 1}: {len(chunk):,} repos")
-                
-            return total_inserted, total_updated
-        else:
-            # Use the regular upsert for smaller batches
-            return self.upsert_repositories(repositories)
+        return total_inserted, total_updated
+    
+    def bulk_upsert_repositories(self, repositories: List) -> Tuple[int, int]:
+        """Bulk upsert - alias for upsert_repositories to maintain compatibility"""
+        return self.upsert_repositories(repositories)
     
     def get_repository_count(self) -> int:
         """Get total number of repositories in database"""

@@ -29,13 +29,15 @@ class Repository:
     license_info: Optional[str]
 
 class AsyncGitHubClient:
-    def __init__(self, token: Optional[str] = None, max_concurrent=10):
+    def __init__(self, token: Optional[str] = None, max_concurrent=5):  # Reduced from 25 to 5
         self.token = token or os.getenv('GITHUB_TOKEN')
         self.base_url = "https://api.github.com/graphql"
         self.max_concurrent = max_concurrent
         self.semaphore = asyncio.Semaphore(max_concurrent)
         self.rate_limit_remaining = 5000
         self.session = None
+        self.last_request_time = 0
+        self.min_request_interval = 1.0  # 1 second between requests
 
     async def __aenter__(self):
         self.session = aiohttp.ClientSession()
@@ -46,6 +48,7 @@ class AsyncGitHubClient:
             await self.session.close()
 
     async def _make_request(self, query: str, variables: Dict = None) -> Dict:
+        """Make request with rate limit protection"""
         headers = {
             "Authorization": f"Bearer {self.token}" if self.token else "",
             "Content-Type": "application/json",
@@ -56,60 +59,99 @@ class AsyncGitHubClient:
             "variables": variables or {}
         }
         
+        # Rate limiting: ensure minimum time between requests
+        current_time = time.time()
+        time_since_last = current_time - self.last_request_time
+        if time_since_last < self.min_request_interval:
+            await asyncio.sleep(self.min_request_interval - time_since_last)
+        
         async with self.semaphore:
-            async with self.session.post(self.base_url, json=payload, headers=headers, timeout=30) as response:
-                if response.status == 200:
-                    data = await response.json()
+            try:
+                async with self.session.post(self.base_url, json=payload, headers=headers, timeout=30) as response:
+                    self.last_request_time = time.time()
                     
-                    # Update rate limit info
-                    if 'data' in data and data.get('data') and 'rateLimit' in data['data']:
-                        rate_limit_data = data['data']['rateLimit']
-                        self.rate_limit_remaining = rate_limit_data['remaining']
-                    
-                    return data
-                else:
-                    raise Exception(f"HTTP {response.status}: {await response.text()}")
+                    if response.status == 200:
+                        data = await response.json()
+                        
+                        # Update rate limit info
+                        if 'data' in data and data.get('data') and 'rateLimit' in data['data']:
+                            rate_limit_data = data['data']['rateLimit']
+                            self.rate_limit_remaining = rate_limit_data['remaining']
+                        
+                        return data
+                    elif response.status == 403:
+                        error_text = await response.text()
+                        if "secondary rate limit" in error_text:
+                            print("⚠️  Secondary rate limit hit! Waiting 5 minutes...")
+                            await asyncio.sleep(300)  # Wait 5 minutes
+                            raise Exception("Secondary rate limit - wait completed")
+                        else:
+                            raise Exception(f"HTTP 403: {error_text}")
+                    else:
+                        raise Exception(f"HTTP {response.status}: {await response.text()}")
+                        
+            except Exception as e:
+                if "secondary rate limit" in str(e):
+                    raise e  # Re-raise to be handled by caller
+                logger.error(f"Request failed: {e}")
+                raise
 
     async def search_repositories_parallel(self, search_queries: List[str], batch_size: int = 100) -> List[Repository]:
-        """Execute multiple search queries in parallel"""
+        """Execute multiple search queries in parallel with better rate limiting"""
         tasks = []
-        for query in search_queries:
-            task = self._search_single_query(query, batch_size)
+        for i, query in enumerate(search_queries):
+            # Stagger requests to avoid secondary rate limits
+            await asyncio.sleep(i * 0.5)  # 0.5 second delay between starting each task
+            task = self._search_single_query_safe(query, batch_size)
             tasks.append(task)
         
-        # Run all searches in parallel
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Run with limited concurrency
+        results = []
+        for i in range(0, len(tasks), 3):  # Process 3 at a time
+            batch = tasks[i:i + 3]
+            batch_results = await asyncio.gather(*batch, return_exceptions=True)
+            results.extend(batch_results)
+            
+            # Small delay between batches
+            if i + 3 < len(tasks):
+                await asyncio.sleep(2)
         
         # Combine all repositories
         all_repositories = []
         for result in results:
             if isinstance(result, Exception):
                 logger.error(f"Query failed: {result}")
-            else:
+            elif isinstance(result, list):
                 all_repositories.extend(result)
         
         return all_repositories
 
-    async def _search_single_query(self, query: str, batch_size: int) -> List[Repository]:
-        """Search repositories for a single query with pagination"""
+    async def _search_single_query_safe(self, query: str, batch_size: int) -> List[Repository]:
+        """Safe search with pagination and error handling"""
         all_repositories = []
         cursor = None
+        pages_fetched = 0
+        max_pages = 3  # Limit pages to avoid hitting 1000-result limit too aggressively
         
-        while len(all_repositories) < 1000:  # GitHub's limit per query
+        while pages_fetched < max_pages:
             try:
                 repositories, next_cursor, _ = await self.search_repositories(query, cursor, batch_size)
                 if not repositories:
                     break
                 
                 all_repositories.extend(repositories)
+                pages_fetched += 1
                 
                 if not next_cursor:
                     break
                     
                 cursor = next_cursor
-                await asyncio.sleep(0.1)  # Small delay between pages
+                await asyncio.sleep(0.5)  # Delay between pages
                 
             except Exception as e:
+                if "secondary rate limit" in str(e):
+                    print(f"⏸️  Secondary limit for '{query}', skipping...")
+                    break
                 logger.error(f"Error in query '{query}': {e}")
                 break
         
