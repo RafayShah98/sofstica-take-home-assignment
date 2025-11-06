@@ -172,18 +172,13 @@ class UltraCrawler:
         
         return await self._execute_parallel_queries(queries, target_count, batch_size)
 
-        async def _execute_parallel_queries(self, queries: List[str], target_count: int, batch_size: int) -> int:
-        """Execute queries in parallel with conservative limits"""
+    async def _execute_parallel_queries(self, queries: List[str], target_count: int, batch_size: int) -> int:
+        """Execute queries in parallel and process results"""
         if not queries:
             return 0
         
-        # Use fewer queries to avoid rate limits
-        safe_queries = queries[:20]  # Reduced from 100 to 20
-        
-        print(f"    🔍 Executing {len(safe_queries)} queries (conservative mode)...")
-        
         # Execute all queries in parallel
-        all_repositories = await self.github_client.search_repositories_parallel(safe_queries, batch_size)
+        all_repositories = await self.github_client.search_repositories_parallel(queries, batch_size)
         
         # Remove duplicates
         unique_repos = [repo for repo in all_repositories if repo.github_id not in self.seen_repository_ids]
@@ -192,7 +187,7 @@ class UltraCrawler:
             return 0
         
         # Batch insert
-        inserted, updated = self.db_manager.upsert_repositories(unique_repos)
+        inserted, updated = self.db_manager.bulk_upsert_repositories(unique_repos)
         
         # Update tracking
         for repo in unique_repos:
@@ -206,6 +201,7 @@ class UltraCrawler:
         print(f"    📊 {crawled_count:,} new repos | Total unique: {len(self.seen_repository_ids):,} | Rate: {rate:.1f}/sec")
         
         return crawled_count
+
     def _load_existing_repository_ids(self):
         """Load existing repository IDs"""
         try:
